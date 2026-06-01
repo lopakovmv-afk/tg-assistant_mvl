@@ -16,9 +16,9 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "0"))
 GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS")
+CALENDAR_ID = os.getenv("CALENDAR_ID", "primary")
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
-
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
 SYSTEM_PROMPT = """Ты — личный ИИ-ассистент. Помогаешь управлять расписанием, задачами и планированием.
@@ -33,55 +33,41 @@ SYSTEM_PROMPT = """Ты — личный ИИ-ассистент. Помогае
   Q3 = Срочно + Не важно (делегируй)
   Q4 = Не срочно + Не важно (удали)
 
-Если пользователь хочет добавить задачу — отвечай ТОЛЬКО в таком JSON:
+Если пользователь хочет добавить задачу — отвечай ТОЛЬКО в таком JSON без лишнего текста:
 {"action": "add_task", "title": "...", "eisenhower": "Q1/Q2/Q3/Q4", "due": "когда (если указано)"}
 
-Если пользователь хочет создать встречу/событие — отвечай ТОЛЬКО в таком JSON:
+Если пользователь хочет создать встречу или событие — отвечай ТОЛЬКО в таком JSON без лишнего текста:
 {"action": "create_event", "title": "...", "date": "YYYY-MM-DD", "time": "HH:MM", "duration_minutes": 60, "description": "..."}
 
-Если пользователь просит показать план или просто общается — отвечай обычным текстом.
-
-Сегодня: """ + datetime.now().strftime("%Y-%m-%d, %A")
+ВАЖНО: date всегда в формате YYYY-MM-DD, time в формате HH:MM. Если сказано "завтра" — используй завтрашнюю дату.
+Сегодня: """ + datetime.now().strftime("%Y-%m-%d")
 
 
 def get_calendar_service():
     try:
         if not GOOGLE_CREDENTIALS:
+            logger.error("GOOGLE_CREDENTIALS not set")
             return None
         creds_data = json.loads(GOOGLE_CREDENTIALS)
         creds = service_account.Credentials.from_service_account_info(
             creds_data, scopes=SCOPES
         )
-        return build("calendar", "v3", credentials=creds)
+        service = build("calendar", "v3", credentials=creds)
+        logger.info("Calendar service created successfully")
+        return service
     except Exception as e:
         logger.error(f"Calendar auth error: {e}")
         return None
 
 
-def get_calendar_id():
-    # Email сервисного аккаунта имеет доступ к основному календарю пользователя
-    # Нужно найти ID календаря по email владельца
+def create_calendar_event(title, date, time, duration_minutes=60, description=""):
     try:
         service = get_calendar_service()
         if not service:
-            return "primary"
-        calendars = service.calendarList().list().execute()
-        for cal in calendars.get("items", []):
-            if cal.get("primary"):
-                return cal["id"]
-        return "primary"
-    except:
-        return "primary"
-
-
-def create_calendar_event(title, date, time, duration_minutes=60, description="", calendar_id="primary"):
-    try:
-        service = get_calendar_service()
-        if not service:
-            return False, "Google Calendar не подключён"
+            return False, "Не удалось подключиться к Google Calendar"
 
         start_dt = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M")
-        end_dt = start_dt + timedelta(minutes=duration_minutes)
+        end_dt = start_dt + timedelta(minutes=int(duration_minutes))
 
         event = {
             "summary": title,
@@ -90,8 +76,10 @@ def create_calendar_event(title, date, time, duration_minutes=60, description=""
             "end": {"dateTime": end_dt.isoformat(), "timeZone": "Europe/Moscow"},
         }
 
-        event = service.events().insert(calendarId=calendar_id, body=event).execute()
-        return True, event.get("htmlLink")
+        logger.info(f"Creating event: {title} on {date} at {time} in calendar {CALENDAR_ID}")
+        result = service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
+        logger.info(f"Event created: {result.get('htmlLink')}")
+        return True, result.get("htmlLink")
     except Exception as e:
         logger.error(f"Calendar event error: {e}")
         return False, str(e)
@@ -100,9 +88,7 @@ def create_calendar_event(title, date, time, duration_minutes=60, description=""
 async def transcribe_voice(file_path):
     with open(file_path, "rb") as audio_file:
         transcript = openai_client.audio.transcriptions.create(
-            model="whisper-1",
-            file=audio_file,
-            language="ru"
+            model="whisper-1", file=audio_file, language="ru"
         )
     return transcript.text
 
@@ -111,12 +97,11 @@ async def process_with_gpt(text, conversation_history):
     conversation_history.append({"role": "user", "content": text})
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + conversation_history[-10:]
     response = openai_client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=messages,
-        max_tokens=1000
+        model="gpt-4o-mini", messages=messages, max_tokens=500
     )
-    reply = response.choices[0].message.content
+    reply = response.choices[0].message.content.strip()
     conversation_history.append({"role": "assistant", "content": reply})
+    logger.info(f"GPT reply: {reply}")
     return reply
 
 
@@ -161,14 +146,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_text_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
     if "history" not in context.user_data:
         context.user_data["history"] = []
-    if "calendar_id" not in context.user_data:
-        context.user_data["calendar_id"] = get_calendar_id()
 
     await update.message.reply_text("⏳ Думаю...")
     reply = await process_with_gpt(text, context.user_data["history"])
 
     try:
-        data = json.loads(reply.strip())
+        # Clean up possible markdown code blocks
+        clean = reply.strip().strip("```json").strip("```").strip()
+        data = json.loads(clean)
         action = data.get("action")
 
         if action == "create_event":
@@ -177,8 +162,7 @@ async def handle_text_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 date=data.get("date", datetime.now().strftime("%Y-%m-%d")),
                 time=data.get("time", "10:00"),
                 duration_minutes=data.get("duration_minutes", 60),
-                description=data.get("description", ""),
-                calendar_id=context.user_data["calendar_id"]
+                description=data.get("description", "")
             )
             if success:
                 await update.message.reply_text(
@@ -189,11 +173,7 @@ async def handle_text_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                     parse_mode="Markdown"
                 )
             else:
-                await update.message.reply_text(
-                    f"⚠️ Не удалось создать событие в Calendar.\n"
-                    f"Ошибка: {result}",
-                    parse_mode="Markdown"
-                )
+                await update.message.reply_text(f"⚠️ Ошибка Calendar: {result}")
 
         elif action == "add_task":
             labels = {
@@ -205,13 +185,12 @@ async def handle_text_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             q = data.get("eisenhower", "Q2")
             due = f"\n📆 Когда: {data.get('due')}" if data.get("due") else ""
             await update.message.reply_text(
-                f"✅ Задача добавлена!\n"
-                f"*{data.get('title')}*{due}\n\n"
-                f"📊 {labels.get(q, q)}",
+                f"✅ Задача добавлена!\n*{data.get('title')}*{due}\n\n📊 {labels.get(q, q)}",
                 parse_mode="Markdown"
             )
         else:
             await update.message.reply_text(reply)
+
     except (json.JSONDecodeError, ValueError):
         await update.message.reply_text(reply)
 
