@@ -1,9 +1,6 @@
-# Telegram AI Ассистент
-
-Личный ИИ-ассистент в Telegram с интеграцией Google Calendar.
-
-## Переменные окружения (Railway)
-
-- `TELEGRAM_TOKEN` — токен твоего Telegram бота
-- `OPENAI_API_KEY` — ключ OpenAI API
-- `ALLOWED_USER_ID` — твой Telegram ID (узнать у @userinfobot)
+python-telegram-bot==21.6
+openai==1.12.0
+google-auth==2.27.0
+google-auth-oauthlib==1.2.0
+google-auth-httplib2==0.2.0
+google-api-python-client==2.116.0
