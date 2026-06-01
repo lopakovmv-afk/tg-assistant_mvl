@@ -6,12 +6,8 @@ from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from openai import OpenAI
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
-from googleapiclient.discovery import build
 from google.oauth2 import service_account
-import pickle
+from googleapiclient.discovery import build
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -52,36 +48,33 @@ def get_calendar_service():
     try:
         if not GOOGLE_CREDENTIALS:
             return None
-        
         creds_data = json.loads(GOOGLE_CREDENTIALS)
-        token_file = "/tmp/token.pickle"
-        creds_file = "/tmp/credentials.json"
-        
-        # Save credentials to temp file
-        with open(creds_file, "w") as f:
-            json.dump(creds_data, f)
-        
-        creds = None
-        if os.path.exists(token_file):
-            with open(token_file, "rb") as token:
-                creds = pickle.load(token)
-
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
-            else:
-                flow = InstalledAppFlow.from_client_secrets_file(creds_file, SCOPES)
-                creds = flow.run_local_server(port=0)
-            with open(token_file, "wb") as token:
-                pickle.dump(creds, token)
-
+        creds = service_account.Credentials.from_service_account_info(
+            creds_data, scopes=SCOPES
+        )
         return build("calendar", "v3", credentials=creds)
     except Exception as e:
         logger.error(f"Calendar auth error: {e}")
         return None
 
 
-def create_calendar_event(title, date, time, duration_minutes=60, description=""):
+def get_calendar_id():
+    # Email сервисного аккаунта имеет доступ к основному календарю пользователя
+    # Нужно найти ID календаря по email владельца
+    try:
+        service = get_calendar_service()
+        if not service:
+            return "primary"
+        calendars = service.calendarList().list().execute()
+        for cal in calendars.get("items", []):
+            if cal.get("primary"):
+                return cal["id"]
+        return "primary"
+    except:
+        return "primary"
+
+
+def create_calendar_event(title, date, time, duration_minutes=60, description="", calendar_id="primary"):
     try:
         service = get_calendar_service()
         if not service:
@@ -97,7 +90,7 @@ def create_calendar_event(title, date, time, duration_minutes=60, description=""
             "end": {"dateTime": end_dt.isoformat(), "timeZone": "Europe/Moscow"},
         }
 
-        event = service.events().insert(calendarId="primary", body=event).execute()
+        event = service.events().insert(calendarId=calendar_id, body=event).execute()
         return True, event.get("htmlLink")
     except Exception as e:
         logger.error(f"Calendar event error: {e}")
@@ -168,6 +161,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_text_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
     if "history" not in context.user_data:
         context.user_data["history"] = []
+    if "calendar_id" not in context.user_data:
+        context.user_data["calendar_id"] = get_calendar_id()
+
     await update.message.reply_text("⏳ Думаю...")
     reply = await process_with_gpt(text, context.user_data["history"])
 
@@ -181,7 +177,8 @@ async def handle_text_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 date=data.get("date", datetime.now().strftime("%Y-%m-%d")),
                 time=data.get("time", "10:00"),
                 duration_minutes=data.get("duration_minutes", 60),
-                description=data.get("description", "")
+                description=data.get("description", ""),
+                calendar_id=context.user_data["calendar_id"]
             )
             if success:
                 await update.message.reply_text(
@@ -193,10 +190,8 @@ async def handle_text_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 )
             else:
                 await update.message.reply_text(
-                    f"📅 Встреча запланирована!\n"
-                    f"*{data.get('title')}*\n"
-                    f"🕐 {data.get('date')} в {data.get('time')}\n\n"
-                    f"⚠️ Google Calendar пока не подключён: {result}",
+                    f"⚠️ Не удалось создать событие в Calendar.\n"
+                    f"Ошибка: {result}",
                     parse_mode="Markdown"
                 )
 
