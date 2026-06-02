@@ -74,6 +74,13 @@ def create_calendar_event(title, date, time, duration_minutes=60, description=""
             "description": description,
             "start": {"dateTime": start_dt.isoformat(), "timeZone": "Europe/Moscow"},
             "end": {"dateTime": end_dt.isoformat(), "timeZone": "Europe/Moscow"},
+            "reminders": {
+                "useDefault": False,
+                "overrides": [
+                    {"method": "popup", "minutes": 60},
+                    {"method": "popup", "minutes": 10},
+                ],
+            },
         }
 
         logger.info(f"Creating event: {title} on {date} at {time} in calendar {CALENDAR_ID}")
