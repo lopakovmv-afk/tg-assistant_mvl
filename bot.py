@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import tempfile
+import requests
 from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -17,6 +18,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "0"))
 GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS")
 CALENDAR_ID = os.getenv("CALENDAR_ID", "primary")
+TODOIST_TOKEN = os.getenv("TODOIST_TOKEN")
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
@@ -24,23 +26,53 @@ SCOPES = ["https://www.googleapis.com/auth/calendar"]
 SYSTEM_PROMPT = """Ты — личный ИИ-ассистент. Помогаешь управлять расписанием, задачами и планированием.
 
 Ты умеешь:
-- Добавлять задачи и напоминания
+- Добавлять задачи в Todoist
 - Создавать встречи в Google Calendar
 - Планировать день, неделю и месяц
 - Расставлять приоритеты по матрице Эйзенхауэра:
-  Q1 = Срочно + Важно (делай немедленно)
-  Q2 = Не срочно + Важно (планируй)
-  Q3 = Срочно + Не важно (делегируй)
-  Q4 = Не срочно + Не важно (удали)
+  Q1 = Срочно + Важно (делай немедленно) → приоритет 1
+  Q2 = Не срочно + Важно (планируй) → приоритет 2
+  Q3 = Срочно + Не важно (делегируй) → приоритет 3
+  Q4 = Не срочно + Не важно (удали) → приоритет 4
 
-Если пользователь хочет добавить задачу — отвечай ТОЛЬКО в таком JSON без лишнего текста:
-{"action": "add_task", "title": "...", "eisenhower": "Q1/Q2/Q3/Q4", "due": "когда (если указано)"}
+Если пользователь хочет добавить задачу — отвечай ТОЛЬКО в таком JSON:
+{"action": "add_task", "title": "...", "eisenhower": "Q1/Q2/Q3/Q4", "due": "YYYY-MM-DD или null"}
 
-Если пользователь хочет создать встречу или событие — отвечай ТОЛЬКО в таком JSON без лишнего текста:
+Если пользователь хочет создать встречу/событие — отвечай ТОЛЬКО в таком JSON:
 {"action": "create_event", "title": "...", "date": "YYYY-MM-DD", "time": "HH:MM", "duration_minutes": 60, "description": "..."}
+
+Если пользователь просит показать план или просто общается — отвечай обычным текстом.
 
 ВАЖНО: date всегда в формате YYYY-MM-DD, time в формате HH:MM. Если сказано "завтра" — используй завтрашнюю дату.
 Сегодня: """ + datetime.now().strftime("%Y-%m-%d")
+
+
+def add_todoist_task(title, priority=2, due_date=None):
+    try:
+        if not TODOIST_TOKEN:
+            return False, "Todoist не подключён"
+        
+        payload = {
+            "content": title,
+            "priority": priority
+        }
+        if due_date:
+            payload["due_date"] = due_date
+
+        response = requests.post(
+            "https://api.todoist.com/rest/v2/tasks",
+            headers={"Authorization": f"Bearer {TODOIST_TOKEN}"},
+            json=payload
+        )
+        
+        if response.status_code == 200:
+            task = response.json()
+            return True, task.get("url", "")
+        else:
+            return False, f"Ошибка {response.status_code}"
+    except Exception as e:
+        logger.error(f"Todoist error: {e}")
+        return False, str(e)
 
 
 def get_calendar_service():
@@ -52,9 +84,7 @@ def get_calendar_service():
         creds = service_account.Credentials.from_service_account_info(
             creds_data, scopes=SCOPES
         )
-        service = build("calendar", "v3", credentials=creds)
-        logger.info("Calendar service created successfully")
-        return service
+        return build("calendar", "v3", credentials=creds)
     except Exception as e:
         logger.error(f"Calendar auth error: {e}")
         return None
@@ -83,9 +113,8 @@ def create_calendar_event(title, date, time, duration_minutes=60, description=""
             },
         }
 
-        logger.info(f"Creating event: {title} on {date} at {time} in calendar {CALENDAR_ID}")
+        logger.info(f"Creating event: {title} on {date} at {time}")
         result = service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
-        logger.info(f"Event created: {result.get('htmlLink')}")
         return True, result.get("htmlLink")
     except Exception as e:
         logger.error(f"Calendar event error: {e}")
@@ -120,7 +149,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Я умею:\n"
         "🎤 Распознавать голосовые сообщения\n"
         "📅 Создавать встречи в Google Calendar\n"
-        "✅ Добавлять задачи с приоритетами\n"
+        "✅ Добавлять задачи в Todoist\n"
         "📊 Матрица Эйзенхауэра\n"
         "🗓 Планировать день, неделю и месяц\n\n"
         "Просто напиши или надиктуй что нужно сделать!"
@@ -158,7 +187,6 @@ async def handle_text_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     reply = await process_with_gpt(text, context.user_data["history"])
 
     try:
-        # Clean up possible markdown code blocks
         clean = reply.strip().strip("```json").strip("```").strip()
         data = json.loads(clean)
         action = data.get("action")
@@ -189,12 +217,26 @@ async def handle_text_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 "Q3": "🔵 Срочно + Не важно — делегируй",
                 "Q4": "⚪ Не срочно + Не важно — удали"
             }
+            priority_map = {"Q1": 4, "Q2": 3, "Q3": 2, "Q4": 1}
             q = data.get("eisenhower", "Q2")
-            due = f"\n📆 Когда: {data.get('due')}" if data.get("due") else ""
-            await update.message.reply_text(
-                f"✅ Задача добавлена!\n*{data.get('title')}*{due}\n\n📊 {labels.get(q, q)}",
-                parse_mode="Markdown"
+            due = data.get("due")
+
+            success, url = add_todoist_task(
+                title=data.get("title"),
+                priority=priority_map.get(q, 3),
+                due_date=due if due and due != "null" else None
             )
+
+            due_text = f"\n📆 Когда: {due}" if due and due != "null" else ""
+            if success:
+                await update.message.reply_text(
+                    f"✅ Задача добавлена в Todoist!\n"
+                    f"*{data.get('title')}*{due_text}\n\n"
+                    f"📊 {labels.get(q, q)}",
+                    parse_mode="Markdown"
+                )
+            else:
+                await update.message.reply_text(f"⚠️ Ошибка Todoist: {url}")
         else:
             await update.message.reply_text(reply)
 
