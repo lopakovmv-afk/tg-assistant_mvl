@@ -3,6 +3,7 @@ import json
 import logging
 import tempfile
 import requests
+import redis
 from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -19,9 +20,60 @@ ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "0"))
 GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS")
 CALENDAR_ID = os.getenv("CALENDAR_ID", "primary")
 TODOIST_TOKEN = os.getenv("TODOIST_TOKEN")
+REDIS_URL = os.getenv("REDIS_URL")
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
+
+# Redis для памяти
+try:
+    redis_client = redis.from_url(REDIS_URL) if REDIS_URL else None
+    if redis_client:
+        redis_client.ping()
+        logger.info("Redis connected!")
+except Exception as e:
+    logger.error(f"Redis connection error: {e}")
+    redis_client = None
+
+
+def get_memory(user_id):
+    if not redis_client:
+        return ""
+    try:
+        data = redis_client.get(f"memory:{user_id}")
+        return data.decode() if data else ""
+    except:
+        return ""
+
+
+def save_memory(user_id, memory_text):
+    if not redis_client:
+        return
+    try:
+        redis_client.set(f"memory:{user_id}", memory_text)
+    except:
+        pass
+
+
+def get_history(user_id):
+    if not redis_client:
+        return []
+    try:
+        data = redis_client.get(f"history:{user_id}")
+        return json.loads(data.decode()) if data else []
+    except:
+        return []
+
+
+def save_history(user_id, history):
+    if not redis_client:
+        return
+    try:
+        # Храним последние 20 сообщений
+        redis_client.set(f"history:{user_id}", json.dumps(history[-20:]))
+    except:
+        pass
+
 
 SYSTEM_PROMPT = """Ты — личный ИИ-ассистент. Помогаешь управлять расписанием, задачами и планированием.
 
@@ -29,6 +81,7 @@ SYSTEM_PROMPT = """Ты — личный ИИ-ассистент. Помогае
 - Добавлять задачи в Todoist
 - Создавать встречи в Google Calendar
 - Планировать день, неделю и месяц
+- Запоминать важную информацию о пользователе
 - Расставлять приоритеты по матрице Эйзенхауэра:
   Q1 = Срочно + Важно (делай немедленно) → приоритет 1
   Q2 = Не срочно + Важно (планируй) → приоритет 2
@@ -41,9 +94,12 @@ SYSTEM_PROMPT = """Ты — личный ИИ-ассистент. Помогае
 Если пользователь хочет создать встречу/событие — отвечай ТОЛЬКО в таком JSON:
 {"action": "create_event", "title": "...", "date": "YYYY-MM-DD", "time": "HH:MM", "duration_minutes": 60, "description": "..."}
 
+Если пользователь просит что-то запомнить — отвечай ТОЛЬКО в таком JSON:
+{"action": "remember", "fact": "что запомнить"}
+
 Если пользователь просит показать план или просто общается — отвечай обычным текстом.
 
-ВАЖНО: date всегда в формате YYYY-MM-DD, time в формате HH:MM. Если сказано "завтра" — используй завтрашнюю дату.
+ВАЖНО: date всегда в формате YYYY-MM-DD, time в формате HH:MM.
 Сегодня: """ + datetime.now().strftime("%Y-%m-%d")
 
 
@@ -51,39 +107,28 @@ def add_todoist_task(title, priority=2, due_date=None):
     try:
         if not TODOIST_TOKEN:
             return False, "Todoist не подключён"
-        
-        payload = {
-            "content": title,
-            "priority": priority
-        }
+        payload = {"content": title, "priority": priority}
         if due_date:
             payload["due_date"] = due_date
-
         response = requests.post(
             "https://api.todoist.com/api/v1/tasks",
             headers={"Authorization": f"Bearer {TODOIST_TOKEN}"},
             json=payload
         )
-        
         if response.status_code == 200:
-            task = response.json()
-            return True, task.get("url", "")
+            return True, response.json().get("url", "")
         else:
             return False, f"Ошибка {response.status_code}"
     except Exception as e:
-        logger.error(f"Todoist error: {e}")
         return False, str(e)
 
 
 def get_calendar_service():
     try:
         if not GOOGLE_CREDENTIALS:
-            logger.error("GOOGLE_CREDENTIALS not set")
             return None
         creds_data = json.loads(GOOGLE_CREDENTIALS)
-        creds = service_account.Credentials.from_service_account_info(
-            creds_data, scopes=SCOPES
-        )
+        creds = service_account.Credentials.from_service_account_info(creds_data, scopes=SCOPES)
         return build("calendar", "v3", credentials=creds)
     except Exception as e:
         logger.error(f"Calendar auth error: {e}")
@@ -95,10 +140,8 @@ def create_calendar_event(title, date, time, duration_minutes=60, description=""
         service = get_calendar_service()
         if not service:
             return False, "Не удалось подключиться к Google Calendar"
-
         start_dt = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M")
         end_dt = start_dt + timedelta(minutes=int(duration_minutes))
-
         event = {
             "summary": title,
             "description": description,
@@ -112,8 +155,6 @@ def create_calendar_event(title, date, time, duration_minutes=60, description=""
                 ],
             },
         }
-
-        logger.info(f"Creating event: {title} on {date} at {time}")
         result = service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
         return True, result.get("htmlLink")
     except Exception as e:
@@ -129,16 +170,21 @@ async def transcribe_voice(file_path):
     return transcript.text
 
 
-async def process_with_gpt(text, conversation_history):
-    conversation_history.append({"role": "user", "content": text})
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + conversation_history[-10:]
+async def process_with_gpt(text, history, memory):
+    history.append({"role": "user", "content": text})
+    
+    system = SYSTEM_PROMPT
+    if memory:
+        system += f"\n\nЧто ты знаешь об этом пользователе:\n{memory}"
+    
+    messages = [{"role": "system", "content": system}] + history[-10:]
     response = openai_client.chat.completions.create(
         model="gpt-4o-mini", messages=messages, max_tokens=500
     )
     reply = response.choices[0].message.content.strip()
-    conversation_history.append({"role": "assistant", "content": reply})
+    history.append({"role": "assistant", "content": reply})
     logger.info(f"GPT reply: {reply}")
-    return reply
+    return reply, history
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -150,9 +196,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🎤 Распознавать голосовые сообщения\n"
         "📅 Создавать встречи в Google Calendar\n"
         "✅ Добавлять задачи в Todoist\n"
-        "📊 Матрица Эйзенхауэра\n"
-        "🗓 Планировать день, неделю и месяц\n\n"
-        "Просто напиши или надиктуй что нужно сделать!"
+        "🧠 Запоминать важную информацию\n"
+        "📊 Матрица Эйзенхауэра\n\n"
+        "Попробуй сказать: *'Запомни что я предпочитаю встречи до 12:00'*",
+        parse_mode="Markdown"
     )
 
 
@@ -180,11 +227,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_text_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
-    if "history" not in context.user_data:
-        context.user_data["history"] = []
+    user_id = update.effective_user.id
+    history = get_history(user_id)
+    memory = get_memory(user_id)
 
     await update.message.reply_text("⏳ Думаю...")
-    reply = await process_with_gpt(text, context.user_data["history"])
+    reply, history = await process_with_gpt(text, history, memory)
+    save_history(user_id, history)
 
     try:
         clean = reply.strip().strip("```json").strip("```").strip()
@@ -220,13 +269,11 @@ async def handle_text_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             priority_map = {"Q1": 4, "Q2": 3, "Q3": 2, "Q4": 1}
             q = data.get("eisenhower", "Q2")
             due = data.get("due")
-
             success, url = add_todoist_task(
                 title=data.get("title"),
                 priority=priority_map.get(q, 3),
                 due_date=due if due and due != "null" else None
             )
-
             due_text = f"\n📆 Когда: {due}" if due and due != "null" else ""
             if success:
                 await update.message.reply_text(
@@ -237,6 +284,14 @@ async def handle_text_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 )
             else:
                 await update.message.reply_text(f"⚠️ Ошибка Todoist: {url}")
+
+        elif action == "remember":
+            fact = data.get("fact", "")
+            current = get_memory(user_id)
+            new_memory = current + f"\n- {fact}" if current else f"- {fact}"
+            save_memory(user_id, new_memory)
+            await update.message.reply_text(f"🧠 Запомнил: *{fact}*", parse_mode="Markdown")
+
         else:
             await update.message.reply_text(reply)
 
