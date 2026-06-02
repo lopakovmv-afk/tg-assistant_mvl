@@ -60,7 +60,7 @@ def add_todoist_task(title, priority=2, due_date=None):
             payload["due_date"] = due_date
 
         response = requests.post(
-            "https://api.todoist.com/rest/v2/tasks",
+            "https://api.todoist.com/api/v1/tasks",
             headers={"Authorization": f"Bearer {TODOIST_TOKEN}"},
             json=payload
         )
