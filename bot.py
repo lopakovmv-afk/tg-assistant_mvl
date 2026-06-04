@@ -25,7 +25,6 @@ REDIS_URL = os.getenv("REDIS_URL")
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
-# Redis для памяти
 try:
     redis_client = redis.from_url(REDIS_URL) if REDIS_URL else None
     if redis_client:
@@ -69,37 +68,71 @@ def save_history(user_id, history):
     if not redis_client:
         return
     try:
-        # Храним последние 20 сообщений
         redis_client.set(f"history:{user_id}", json.dumps(history[-20:]))
     except:
         pass
 
 
-SYSTEM_PROMPT = """Ты — личный ИИ-ассистент. Помогаешь управлять расписанием, задачами и планированием.
+SYSTEM_PROMPT = """Ты — личный ИИ-ассистент Максима Лопакова.
 
-Ты умеешь:
-- Добавлять задачи в Todoist
-- Создавать встречи в Google Calendar
-- Планировать день, неделю и месяц
-- Запоминать важную информацию о пользователе
-- Расставлять приоритеты по матрице Эйзенхауэра:
-  Q1 = Срочно + Важно (делай немедленно) → приоритет 1
-  Q2 = Не срочно + Важно (планируй) → приоритет 2
-  Q3 = Срочно + Не важно (делегируй) → приоритет 3
-  Q4 = Не срочно + Не важно (удали) → приоритет 4
+## О МАКСИМЕ
+Максим Лопаков, 31 год (06.06.1994). Предприниматель, отец троих детей. Супруга Екатерина.
+База — дисциплина. Бразильское джиу-джитсу (пурпурный пояс), КМС по боевому самбо. Верующий.
+Стиль — стратегический: архитектура бизнеса, слабые места, решения через цифры. Не про операционку.
+Решения: цифры + обсуждение + интуиция. Двигается от интуитивного к системному управлению.
+Глобальная цель: стать первым долларовым миллионером в семье, не переступив через моральные принципы.
+Активно изучает ИИ для оптимизации процессов.
 
-Если пользователь хочет добавить задачу — отвечай ТОЛЬКО в таком JSON:
-{"action": "add_task", "title": "...", "eisenhower": "Q1/Q2/Q3/Q4", "due": "YYYY-MM-DD или null"}
+## ПОРТФЕЛЬ БИЗНЕСОВ
 
-Если пользователь хочет создать встречу/событие — отвечай ТОЛЬКО в таком JSON:
-{"action": "create_event", "title": "...", "date": "YYYY-MM-DD", "time": "HH:MM", "duration_minutes": 60, "description": "..."}
+### ВЕЗИБЕНЗИН
+Цифровой сервис комплексного топливообеспечения предприятий (B2B).
+Полный цикл: поставка → хранение → заправка → контроль → аналитика → сервис.
+Продукты: бесплатная установка КАЗС, мобильные бустеры, оптовые поставки, комбо КАЗС+Бустер.
+Целевые отрасли: ТКО, горнодобыча, производство, FMCG/логистика.
+Инфраструктура: нефтебазы с ж/д тупиками от Сибири до Центральной России.
 
-Если пользователь просит что-то запомнить — отвечай ТОЛЬКО в таком JSON:
-{"action": "remember", "fact": "что запомнить"}
+### ТЗРН
+Завод в Томске. Контрактный производитель безалкогольных напитков (СТМ).
+Модель: давальческое сырьё — заказчик привозит ингредиенты и рецептуру, ТЗРН варит, разливает, упаковывает, отгружает.
+Мощность: варочный порядок 2000 л, линия розлива 500 банок/час.
+Целевая цена СТМ: 15-25 руб/единица.
+Стратегия: ТЗРН = производственная инфраструктура для брендов, не самостоятельный продавец.
 
-Если пользователь просит показать план или просто общается — отвечай обычным текстом.
+### ВЫНЕСИ ПОПИТЬ
+Бренд натуральных лимонадов. В процессе выделения в отдельную компанию.
+Новая структура: другой учредительный состав + инфлюенсер.
+Модель: компания-бренд без собственных мощностей — развивает бренды и загружает контрактные производства (в т.ч. ТЗРН).
+Позиционирование: без сахара, без подсластителей, массовый рынок, вкус как драйвер повторных покупок.
 
-ВАЖНО: date всегда в формате YYYY-MM-DD, time в формате HH:MM.
+### HUMANTECH
+Оператор производственных процессов для предприятий ТКО. Не аутстаффинг.
+Продукт: управляемая производственная мощность объекта сортировки ТКО.
+KPI: выполнение производственного плана, объём выборки, стабильность смен.
+Учредители: Максим (архитектура, система, KPI), Эмиль (стратегия, развитие, переговоры), Артур (операционка), Виталий.
+Стратегическая цель: федеральная платформа ТКО → подготовка к продаже как инвестиционного актива.
+Команда: Ильдар (финансы), Артур (операции), Виталий, Ксения (координатор), Евгения (привлечение).
+
+## СТИЛЬ РАБОТЫ
+- Гибкий график, 1-3 встречи/звонка в день
+- Контроль через цифры и личные встречи
+- Ориентирован на результат
+- Предпочитает чёткие структурированные ответы без воды
+
+## КАК ОТВЕЧАТЬ
+- Обращайся на "ты"
+- Чётко и структурированно, без лишних слов
+- Конкретные действия и выводы
+- Если видишь системную проблему или слабое место — скажи прямо
+
+## ФОРМАТЫ (только JSON, без лишнего текста):
+Встреча: {"action":"create_event","title":"...","date":"YYYY-MM-DD","time":"HH:MM","duration_minutes":60,"description":"..."}
+Задача: {"action":"add_task","title":"...","eisenhower":"Q1/Q2/Q3/Q4","due":"YYYY-MM-DD или null"}
+Запомнить: {"action":"remember","fact":"..."}
+Всё остальное — текст, чётко и по делу.
+
+МАТРИЦА ЭЙЗЕНХАУЭРА: Q1=Срочно+Важно, Q2=Не срочно+Важно, Q3=Срочно+Не важно, Q4=Не срочно+Не важно
+
 Сегодня: """ + datetime.now().strftime("%Y-%m-%d")
 
 
@@ -172,18 +205,15 @@ async def transcribe_voice(file_path):
 
 async def process_with_gpt(text, history, memory):
     history.append({"role": "user", "content": text})
-    
     system = SYSTEM_PROMPT
     if memory:
-        system += f"\n\nЧто ты знаешь об этом пользователе:\n{memory}"
-    
+        system += f"\n\n## ЧТО ЗАПОМНЕНО О МАКСИМЕ:\n{memory}"
     messages = [{"role": "system", "content": system}] + history[-10:]
     response = openai_client.chat.completions.create(
         model="gpt-4o-mini", messages=messages, max_tokens=500
     )
     reply = response.choices[0].message.content.strip()
     history.append({"role": "assistant", "content": reply})
-    logger.info(f"GPT reply: {reply}")
     return reply, history
 
 
@@ -191,15 +221,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ALLOWED_USER_ID:
         return
     await update.message.reply_text(
-        "👋 Привет! Я твой личный ИИ-ассистент.\n\n"
-        "Я умею:\n"
-        "🎤 Распознавать голосовые сообщения\n"
-        "📅 Создавать встречи в Google Calendar\n"
-        "✅ Добавлять задачи в Todoist\n"
-        "🧠 Запоминать важную информацию\n"
+        "👋 Привет, Максим!\n\n"
+        "Я знаю твои бизнесы и готов помогать.\n\n"
+        "Умею:\n"
+        "🎤 Голосовые сообщения\n"
+        "📅 Встречи в Google Calendar\n"
+        "✅ Задачи в Todoist\n"
+        "🧠 Запоминать важное\n"
         "📊 Матрица Эйзенхауэра\n\n"
-        "Попробуй сказать: *'Запомни что я предпочитаю встречи до 12:00'*",
-        parse_mode="Markdown"
+        "Говори что нужно."
     )
 
 
@@ -214,7 +244,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tmp_path = tmp.name
     try:
         text = await transcribe_voice(tmp_path)
-        await update.message.reply_text(f"📝 Распознано: *{text}*", parse_mode="Markdown")
+        await update.message.reply_text(f"📝 *{text}*", parse_mode="Markdown")
         await handle_text_logic(update, context, text)
     finally:
         os.unlink(tmp_path)
@@ -231,7 +261,7 @@ async def handle_text_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     history = get_history(user_id)
     memory = get_memory(user_id)
 
-    await update.message.reply_text("⏳ Думаю...")
+    await update.message.reply_text("⏳")
     reply, history = await process_with_gpt(text, history, memory)
     save_history(user_id, history)
 
@@ -250,10 +280,10 @@ async def handle_text_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             )
             if success:
                 await update.message.reply_text(
-                    f"✅ Встреча создана в Google Calendar!\n"
+                    f"✅ Встреча создана!\n"
                     f"📅 *{data.get('title')}*\n"
                     f"🕐 {data.get('date')} в {data.get('time')}\n"
-                    f"🔗 [Открыть в календаре]({result})",
+                    f"🔗 [Открыть]({result})",
                     parse_mode="Markdown"
                 )
             else:
@@ -261,10 +291,10 @@ async def handle_text_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
         elif action == "add_task":
             labels = {
-                "Q1": "🔴 Срочно + Важно — делай немедленно",
-                "Q2": "🟡 Не срочно + Важно — запланируй",
-                "Q3": "🔵 Срочно + Не важно — делегируй",
-                "Q4": "⚪ Не срочно + Не важно — удали"
+                "Q1": "🔴 Q1 — делай немедленно",
+                "Q2": "🟡 Q2 — запланируй",
+                "Q3": "🔵 Q3 — делегируй",
+                "Q4": "⚪ Q4 — удали"
             }
             priority_map = {"Q1": 4, "Q2": 3, "Q3": 2, "Q4": 1}
             q = data.get("eisenhower", "Q2")
@@ -274,12 +304,10 @@ async def handle_text_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 priority=priority_map.get(q, 3),
                 due_date=due if due and due != "null" else None
             )
-            due_text = f"\n📆 Когда: {due}" if due and due != "null" else ""
+            due_text = f"\n📆 {due}" if due and due != "null" else ""
             if success:
                 await update.message.reply_text(
-                    f"✅ Задача добавлена в Todoist!\n"
-                    f"*{data.get('title')}*{due_text}\n\n"
-                    f"📊 {labels.get(q, q)}",
+                    f"✅ Задача в Todoist!\n*{data.get('title')}*{due_text}\n{labels.get(q, q)}",
                     parse_mode="Markdown"
                 )
             else:
